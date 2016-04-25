@@ -1,0 +1,498 @@
+#include <iostream>
+#include <cstdio>
+#include <vector>
+#include <list>
+#include <stdlib.h>
+#include <opencv/cv.h>
+#include <opencv/highgui.h>
+#include <string.h>
+#include <string.h>
+
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#define NAME "make4.wmv"
+#define PI 3.14159265
+//#define MASKSIZE 20
+#define DIRECTION_A 0
+#define DIRECTION_B 1
+#define DIRECTION_C
+#define DIRECTION_D 3
+typedef unsigned char BYTE;
+#define CV_GET_B(img,x,y) CV_IMAGE_ELEM((img), BYTE, (y), (x) * 3 + 0)
+#define CV_GET_G(img,x,y) CV_IMAGE_ELEM((img), BYTE, (y), (x) * 3 + 1)
+#define CV_GET_R(img,x,y) CV_IMAGE_ELEM((img), BYTE, (y), (x) * 3 + 2)
+#define SA      struct sockaddr
+#define MAXLINE 4096
+#define MAXSUB  200
+#define LISTENQ         1024
+typedef struct line{
+   CvPoint start;
+   CvPoint end;
+   int inCount;
+   int outCount;
+   int direct[8];
+   // 0:U, 1:D, 2:L, 3:R
+   char ID[10];
+}LINE;
+typedef struct roi{
+   int id;
+   int leftTop_x;
+   int leftTop_y;
+   int rightBot_x;
+   int rightBot_y;
+   CvPoint past;
+   char inDirection[10];
+   char outDirection[10];
+   int flag;
+   int lifetime;
+}ROI;
+using namespace cv;
+using namespace std;
+double MASKSIZE = 30;
+list<ROI> ROIs;
+list<ROI>::iterator itor;
+int ROI_num = 0;
+CvCapture *capture = cvCaptureFromCAM(0);
+
+char cameraID[10];
+
+ssize_t process_http(int sockfd, char *host, char *page, char *poststr)
+{
+ char sendline[MAXLINE + 1], recvline[MAXLINE + 1];
+ ssize_t n;
+ snprintf(sendline, MAXSUB,
+  "POST %s HTTP/1.0\r\n"
+  "Host: %s\r\n"
+  "Content-type: application/json\r\n"
+  "Content-length: %d\r\n\r\n"
+  "%s", page, host, strlen(poststr), poststr);
+ write(sockfd, sendline, strlen(sendline));
+ printf("POST %s HTTP/1.0\r\n"
+  "Host: %s\r\n"
+  "Content-type: application/json\r\n"
+  "Content-length: %d\r\n\r\n"
+  "%s", page, host, strlen(poststr), poststr);
+ while ((n = read(sockfd, recvline, MAXLINE)) > 0) {
+  recvline[n] = '\0';
+  printf("%s", recvline);
+ }
+ return n;
+}
+
+void subBackg(){
+  // CvCapture *capture = cvCaptureFromFile(NAME);
+   // 비디오 파일과 연결된 포인터 capture이 비어있다면 비디오를 불러오는것에 실패한 것 이므로 프로그램을 종료
+
+   if (!capture)    {
+      cout << "The video file was not found.";
+      exit(0);
+   }
+   // cvGetCaptureProperty 함수를 사용하여 비디오 파일과 연결된 포인터 capture로부터
+   // 프레임의 가로와 세로 크기 정보를 읽어서 width와 height에 저장한다.
+   int width = (int)cvGetCaptureProperty(capture, CV_CAP_PROP_FRAME_WIDTH);
+   int height = (int)cvGetCaptureProperty(capture, CV_CAP_PROP_FRAME_HEIGHT);
+   // OpenCV의 자료구조인 CvSize 의 변수 frameSize를 생성
+   // CvSize의 멤버변수로는 height와 width가 있는데, 이 멤버변수의 width와 height의 값을 업데이트 시켜줌
+   CvSize frameSize = cvSize(width/4, height/4);
+   // 이미지를 불러오기 위한 iplimage 구조체를 생성
+   // 생성된 구조체에 image를 생성하여 생성해줌
+   // 그레이 스케일 영상을 저장할 grayImage와 cvAcc 함수를 이용하여 누적하기 위한 sumImage영상을 생성
+   // cvZero 함수를 사용하여 sumImage를 0으로 초기화한다.
+   IplImage *grayImage = cvCreateImage(frameSize, IPL_DEPTH_8U, 1);
+   IplImage *sumImage = cvCreateImage(frameSize, IPL_DEPTH_32F, 1);
+   cvZero(sumImage);
+   cvZero(grayImage);
+   IplImage *frame = NULL;
+   IplImage *scaled;
+   int t = 0;
+   cout << "making background 0% ";
+   while (t<10)    {
+      // capture로부터 프레임을 획득하여 포인터 frame에 저장한다.
+      frame = cvQueryFrame(capture);
+      scaled = cvCreateImage(frameSize, frame->depth, frame->nChannels);
+      cvResize(frame, scaled, CV_INTER_LINEAR);
+      if (!frame)    break;
+      t++;
+      //std::cout << t << std::endl;
+      // frame은 컬러이므로 cvCvtColor 함수를 이용하여 그레이 스케일 영상으로 변환하여 grayscale에 저장
+      cvCvtColor(scaled, grayImage, CV_BGR2GRAY);
+      // cvAcc 함수를 사용하여 grayImage 영상을 sumImage에 누적한다
+      cvAcc(grayImage, sumImage, NULL);
+      if (t % 100 == 0) cout << (t / 100) * 20 << "% ";
+   }
+   cout << endl;
+   // cvScale 함수를 사용하여 누적 영상 sumImage를 1.0/t로 스케일링하여 평균 영상을 계산하여 sumImage에 다시 저장
+   cvScale(sumImage, sumImage, 1.0 / t);
+   cvSaveImage("handBkg.jpg", sumImage);
+   cvReleaseImage(&sumImage);
+   cvReleaseImage(&grayImage);
+   cvReleaseCapture(&capture);
+}
+bool startLine = false;
+bool drawStartLine = false;
+bool endLine = false;
+bool drawEndLine = false;
+LINE lines[9];
+int lineIndex = 1; //// 여기 고쳣음
+int start1_x = 0;
+int start1_y = 0;
+int end1_x = 0;
+int end1_y = 0;
+int start2_x = 0;
+int start2_y = 0;
+int end2_x = 0;
+int end2_y = 0;
+bool startRect = false;
+bool drawRect = false;
+int rectLeftTop_x = 0;
+int rectLeftTop_y = 0;
+int rectRightBot_x = 0;
+int rectRightBot_y = 0;
+char tmpID[10];
+
+
+bool isCounterClock(int a, int b, int c, int d, int e, int f){
+   float i;
+   i = a*d + c*f + e*b - (c*b + a*f + e*d);
+   if (i >= 0)
+      return 1;
+   return 0;
+}
+CvPoint octagon[8];
+int main(int argc, char** argv) {
+   ///////////////////////////////////////////////////////////////////////////////////////////////
+
+  ////////////////////////////
+  int sockfd;
+ struct sockaddr_in servaddr;
+ char **pptr;
+ //********** You can change. Puy any values here *******
+ char *hname = "210.118.69.63";
+ //char *hname = "souptonuts.sourceforge.net";
+ char *page = "/data";
+ //*******************************************************
+ char str[50];
+ struct hostent *hptr;
+
+
+  ///////////
+
+   /////////////////////////////////////////////////////////////////////////////////////////////////
+  // CvCapture *capture = cvCaptureFromFile(NAME);
+   if (!capture)    {
+      cout << "The video file was not found.";
+      return 0;
+   }
+   srand(15);
+   int width = (int)cvGetCaptureProperty(capture, CV_CAP_PROP_FRAME_WIDTH);
+   int height = (int)cvGetCaptureProperty(capture, CV_CAP_PROP_FRAME_HEIGHT);
+   CvSize frameSize = cvSize(width, height);
+   CvSize scaledSize = cvSize(width/4, height/4);
+   width/=4;
+   height/=4;
+   int widthLength = ((double)width * 0.9)/4;
+   int heightLength = ((double)height * 0.9)/4;
+
+   octagon[0] = cvPoint((int)((double)width * 0.05) + widthLength , (int)((double)height * 0.05));
+   printf("0 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength,(int)((double)height * 0.05));
+   lines[0].start = octagon[0];
+   octagon[1] = cvPoint((int)((double)width * 0.05) + widthLength*3 , (int)((double)height * 0.05));
+   printf("1 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength*3,(int)((double)height * 0.05));
+   lines[0].end = octagon[1];
+   strcpy(lines[0].ID, "U");
+   lines[1].start = octagon[1];
+   octagon[2] = cvPoint((int)((double)width * 0.05) + widthLength*4 , (int)((double)height * 0.05) + heightLength);
+   printf("2 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength*4, (int)((double)height * 0.05) + heightLength);
+   lines[1].end = octagon[2];
+   strcpy(lines[1].ID, "RU");
+   lines[2].start = octagon[2];
+   octagon[3] = cvPoint((int)((double)width * 0.05) + widthLength*4 , (int)((double)height * 0.05) + heightLength * 3);
+   printf("3 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength*4, (int)((double)height * 0.05) + heightLength * 3);
+   lines[2].end = octagon[3];
+   strcpy(lines[2].ID, "R");
+   lines[3].start = octagon[3];
+   octagon[4] = cvPoint((int)((double)width * 0.05) + widthLength*3 , (int)((double)height * 0.05) + heightLength * 4);
+   printf("4 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength*3, (int)((double)height * 0.05) + heightLength * 4);
+   lines[3].end = octagon[4];
+   strcpy(lines[3].ID, "RD");
+   lines[4].start = octagon[4];
+   octagon[5] = cvPoint((int)((double)width * 0.05) + widthLength , (int)((double)height * 0.05) + heightLength * 4);
+   printf("5 : (%d,%d)\n",(int)((double)width * 0.05) + widthLength, (int)((double)height * 0.05) + heightLength * 4);
+   lines[4].end = octagon[5];
+   strcpy(lines[4].ID, "D");
+   lines[5].start = octagon[5];
+   octagon[6] = cvPoint((int)((double)width * 0.05) , (int)((double)height * 0.05) + heightLength * 3);
+   printf("6 : (%d,%d)\n",(int)((double)width * 0.05), (int)((double)height * 0.05) + heightLength * 3);
+   lines[5].end = octagon[6];
+   strcpy(lines[5].ID, "LD");
+   lines[6].start = octagon[6];
+   octagon[7] = cvPoint((int)((double)width * 0.05) , (int)((double)height * 0.05) + heightLength);
+   printf("7 : (%d,%d)\n",(int)((double)width * 0.05), (int)((double)height * 0.05) + heightLength);
+   lines[6].end = octagon[7];
+   strcpy(lines[6].ID, "L");
+   lines[7].start = octagon[7];
+   lines[7].end = octagon[0];
+   strcpy(lines[7].ID, "LU");
+   lineIndex = 8;
+   IplImage *frame = cvCreateImage(scaledSize, IPL_DEPTH_8U, 1);
+   IplImage *grayImage = cvCreateImage(scaledSize, IPL_DEPTH_8U, 1);
+   IplImage *diffImage = cvCreateImage(scaledSize, IPL_DEPTH_8U, 1);
+   IplImage *Mask = cvCreateImage(scaledSize, IPL_DEPTH_8U, 3);
+   IplImage *test = cvCreateImage(scaledSize, IPL_DEPTH_8U, 3);
+   IplImage *scaled;
+
+   cvZero(grayImage);
+   //cvSet(Mask,cvScalar(255,0,255));
+   cvZero(Mask);
+   CvSeq* contours = 0;
+   CvSeq* result = 0;
+   CvMemStorage* storage = cvCreateMemStorage(0);
+   CvFont font;
+   cvInitFont(&font, CV_FONT_HERSHEY_SIMPLEX, 0.3, 0.3, 0, 1, CV_AA);
+   subBackg();
+    ////////
+
+ cout << "Please Input Camera ID : ";
+ cin >> cameraID;
+ cout << cameraID << endl;
+
+ ///////////
+ //  capture = cvCaptureFromFile(NAME);
+  capture = cvCaptureFromCAM(0);
+    cout<< "1"<<endl;
+   if (!capture)    {
+      cout << "The video file was not found" << std::endl;
+      return 0;
+   }
+   IplImage *bkgImage = cvLoadImage("handBkg.jpg", CV_LOAD_IMAGE_GRAYSCALE);
+   if (bkgImage == NULL){
+      return -1;
+   }
+   int num;
+   double area;
+   char buffer[512];
+   CvPoint tmp_polygon[1][4];
+   int npt[] = { 4 };
+   CvPoint tmp_X[1][4];
+   int nptX[] = { 4 };
+   int leftTop_x, rightBot_x;
+   int leftTop_y, rightBot_y;
+   int newLeftTop_x, newLeftTop_y, newRightBot_x, newRightBot_y;
+   int R, G, B;
+   int detectR, detectG, detectB;
+   bool tmp1, tmp2, tmp3, tmp4;
+   int inCount = 0;
+   int outCount = 0;
+   int frameNum = 0;
+   int countFlag = -1;
+   ////////////////////////////////////////////////////////////////////////////////////////
+    int temp1 = 1;
+ int temp2 = 0;
+   ////////////////////////////////////////////////////////////////////////////////////////
+    if ((hptr = gethostbyname(hname)) == NULL) {
+                         fprintf(stderr, " gethostbyname error for host: %s: %s", hname, hstrerror(h_errno));
+                         exit(1);
+                        }
+                        printf("hostname: %s\n", hptr->h_name);
+                        if (hptr->h_addrtype == AF_INET && (pptr = hptr->h_addr_list) != NULL) {
+                         printf("address: %s\n", inet_ntop(hptr->h_addrtype, *pptr, str,
+                          sizeof(str)));
+                        }
+                        else {
+                         fprintf(stderr, "Error call inet_ntop \n");
+                        }
+
+
+   while (1)    {
+      for (itor = ROIs.begin(); itor != ROIs.end(); itor++){
+         if ((*itor).lifetime < 0){
+            cvRectangle(Mask, cvPoint((*itor).leftTop_x, (*itor).leftTop_y), cvPoint((*itor).rightBot_x, (*itor).rightBot_y), CV_RGB(0, 0, 0), CV_FILLED, 8);
+            ROIs.erase(itor);
+            break;
+         }
+         (*itor).lifetime--;
+      }
+      countFlag++;
+      countFlag %= 7;
+      // capture로부터 프레임을 획득하여 포인터 frame에 저장한다.
+      frame = cvQueryFrame(capture);
+
+      //down scale
+      scaled = cvCreateImage(scaledSize, frame->depth, frame->nChannels);
+      cvResize(frame, scaled, CV_INTER_LINEAR);
+      cvCvtColor(scaled, grayImage, CV_BGR2GRAY);
+      cvAbsDiff(bkgImage, grayImage, diffImage);
+      cvCvtColor(scaled, grayImage, CV_BGR2GRAY);
+      cvAbsDiff(bkgImage, grayImage, diffImage);
+      cvSmooth(diffImage, diffImage, CV_MEDIAN, 5, 5);
+      //cvMorphologyEx(diffImage, diffImage, NULL, NULL, CV_MOP_OPEN, 3);
+      //cvMorphologyEx(diffImage, diffImage, NULL, NULL, CV_MOP_CLOSE, 3);
+      cvThreshold(diffImage, diffImage, 20, 255, CV_THRESH_BINARY);
+      //if (drawStartLine){
+         for (int i = 0; i < lineIndex; i++){
+            cvLine(scaled, cvPoint(lines[i].start.x, lines[i].start.y), cvPoint(lines[i].end.x, lines[i].end.y), CV_RGB(0, 255, 0), 2, 0);
+
+            sprintf(buffer, "ID(%s), %d / %d", lines[i].ID, lines[i].inCount, lines[i].outCount);
+            cvPutText(scaled, buffer, cvPoint((lines[i].start.x+lines[i].end.x)/2, (lines[i].start.y+lines[i].end.y)/2), &font, cvScalar(0, 255, 0));
+         }
+      //}
+      if (drawEndLine){
+         cvLine(scaled, cvPoint(start2_x, start2_y), cvPoint(end2_x, end2_y), CV_RGB(255, 0, 0), 2, 0);
+         tmp_polygon[0][2] = cvPoint(end2_x, end2_y);
+         tmp_polygon[0][3] = cvPoint(start2_x, start2_y);
+         CvPoint* pollygon[1] = { tmp_polygon[0] };
+         cvFillPoly(scaled, pollygon, npt, 1, CV_RGB(175, 255, 223), 8, 0);
+      }
+
+      if (drawRect){
+         //cvEllipse(diffImage,cvPoint((ellipseStart_x+ellipseEnd_x)/2,(ellipseStart_y+ellipseEnd_y)/2),cvSize(widthEllipse,heightEllipse),ellipseAngle,0,360,CV_RGB(255,255,255),CV_FILLED,0);
+         cvRectangle(diffImage, cvPoint(rectLeftTop_x, rectLeftTop_y), cvPoint(rectRightBot_x, rectRightBot_y), CV_RGB(255, 255, 255), CV_FILLED, 0);
+      }
+     // cvShowImage("threshold", diffImage);
+      cvFindContours(diffImage, storage, &contours, sizeof(CvContour), CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, cvPoint(0, 0));
+      cvNamedWindow("Scaled Video");
+      //cvSetMouseCallback("Scaled Video", on_eventhandle, (void *)grayImage);
+
+      while (contours){
+         result = cvApproxPoly(contours, sizeof(CvContour), storage, CV_POLY_APPROX_DP, cvContourPerimeter(contours)*0.01, 0);
+         area = fabs(cvContourArea(result, CV_WHOLE_SEQ));
+         //if (area > 400 && area < 15000){
+            vector<CvPoint*> pt;
+            for (int i = 0; i<result->total; i++){
+               pt.push_back((CvPoint*)cvGetSeqElem(result, i));
+            }
+            int posX = 0;
+            int posY = 0;
+            for (int i = 0; i<pt.size(); i++){
+               posX += pt[i]->x;
+               posY += pt[i]->y;
+            }
+            posX /= result->total;
+            posY /= result->total;
+            R = CV_GET_R(scaled, posX, posY);
+            G = CV_GET_G(scaled, posX, posY);
+            B = CV_GET_B(scaled, posX, posY);
+            detectR = CV_GET_R(Mask, posX, posY);
+            detectG = CV_GET_G(Mask, posX, posY);
+            detectB = CV_GET_B(Mask, posX, posY);
+            MASKSIZE = sqrt(area) / 8 * 5;
+            MASKSIZE = MASKSIZE > 40 ? 40 : MASKSIZE;
+            cvCircle(scaled, cvPoint(posX, posY), 5, CV_RGB(rand() % 255, rand() % 255, rand() % 255), -1);
+            cvRectangle(scaled, cvPoint(posX - MASKSIZE, posY - MASKSIZE), cvPoint(posX + MASKSIZE, posY + MASKSIZE), CV_RGB(rand() % 255, rand() % 255, rand() % 255), 1, 8);
+            //if(R == 175 && G ==255 && B == 223){
+            if (detectR == 255 && detectG == 0 && detectB == 255){
+               for (itor = ROIs.begin(); itor != ROIs.end(); itor++){
+                  if ((*itor).rightBot_x > posX && posX >(*itor).leftTop_x && (*itor).rightBot_y > posY && posY > (*itor).leftTop_y){
+                     cvRectangle(Mask, cvPoint((*itor).leftTop_x, (*itor).leftTop_y), cvPoint((*itor).rightBot_x, (*itor).rightBot_y), CV_RGB(0, 0, 0), CV_FILLED, 8);
+                     cvRectangle(Mask, cvPoint(posX - MASKSIZE, posY - MASKSIZE), cvPoint(posX + MASKSIZE, posY + MASKSIZE), CV_RGB(255, 0, 255), CV_FILLED, 8);
+                     (*itor).leftTop_x = posX - MASKSIZE;
+                     (*itor).leftTop_y = posY - MASKSIZE;
+                     (*itor).rightBot_x = posX + MASKSIZE;
+                     (*itor).rightBot_y = posY + MASKSIZE;
+                     if (countFlag == 0){
+                        for (int i = 0; i < lineIndex; i++){
+                            bool tmp1 = isCounterClock((*itor).past.x, (*itor).past.y, posX, posY, lines[i].start.x, lines[i].start.y);
+                            bool tmp2 = isCounterClock((*itor).past.x, (*itor).past.y, posX, posY, lines[i].end.x, lines[i].end.y);
+                            bool tmp3 = isCounterClock(lines[i].start.x, lines[i].start.y, lines[i].end.x, lines[i].end.y, (*itor).past.x, (*itor).past.y);
+                            bool tmp4 = isCounterClock(lines[i].start.x, lines[i].start.y, lines[i].end.x, lines[i].end.y, posX, posY);
+
+                           char poststr[MAXLINE + 1];
+                           if (tmp1 == 0 && tmp2 == 1 && tmp3 == 1 && tmp4 == 0){
+
+                              if((*itor).flag){
+                                 printf("Object %d : %s -> %s \n",(*itor).id,(*itor).inDirection,lines[i].ID);
+                                 snprintf(poststr, MAXSUB, "{\"camera_id\": \"%s\",\"in_direction\": \"%s\", \"out_direction\": \"%s\"}\r\n", cameraID, (*itor).inDirection, lines[i].ID);
+                               sockfd = socket(AF_INET, SOCK_STREAM, 0);
+                               bzero(&servaddr, sizeof(servaddr));
+                               servaddr.sin_family = AF_INET;
+                               servaddr.sin_port = htons(3000);
+                               inet_pton(AF_INET, str, &servaddr.sin_addr);
+                               connect(sockfd, (SA *)& servaddr, sizeof(servaddr));
+                               process_http(sockfd, hname, page, poststr);
+                               cout << "succes" << endl;
+                               close(sockfd);
+                              }
+                              else{
+                                 strcpy((*itor).inDirection,lines[i].ID);
+                                 (*itor).flag = 1;
+                              }
+                              lines[i].inCount++;
+                              ///////////////////////////////////////////////////////////////////////////////////////////////
+                              //나중에 여기에서 ID랑 IN, Out 방향 적어서 보내야됨 시간이랑
+
+                              ////////////////////////////////////////////////////////////////////////////////////////////////////
+                           }
+                           if (tmp1 == 1 && tmp2 == 0 && tmp3 == 0 && tmp4 == 1){
+
+                              if((*itor).flag){
+                                 printf("Object %d : %s -> %s \n",(*itor).id,(*itor).inDirection,lines[i].ID);
+                                   snprintf(poststr, MAXSUB, "{\"camera_id\": \"%s\",\"in_direction\": \"%s\", \"out_direction\": \"%s\"}\r\n", cameraID, (*itor).inDirection, lines[i].ID);
+                               sockfd = socket(AF_INET, SOCK_STREAM, 0);
+                               bzero(&servaddr, sizeof(servaddr));
+                               servaddr.sin_family = AF_INET;
+                               servaddr.sin_port = htons(3000);
+                               inet_pton(AF_INET, str, &servaddr.sin_addr);
+                               connect(sockfd, (SA *)& servaddr, sizeof(servaddr));
+                               process_http(sockfd, hname, page, poststr);
+                               cout << "succes" << endl;
+                               close(sockfd);
+
+                              }
+                              else{
+                                 strcpy((*itor).inDirection,lines[i].ID);
+                                 (*itor).flag = 1;
+                              }
+                              lines[i].outCount++;
+                              ////////////////////////////////////////////////////////////////////////////////////////////////
+
+                              ///////////////////////////////////////////////////////////////////////////////////////////////
+                           }
+                        }
+                        (*itor).past = cvPoint(posX, posY);
+                        ////////////////////////////////////////////////////////////
+                        /*
+
+                        */
+                        ////////////////////////////////////////////////////////////////
+                     }
+                     sprintf(buffer, "%d", (*itor).id);
+                     cvPutText(scaled, buffer, cvPoint(posX, posY), &font, CV_RGB(0, 255, 255));
+                     (*itor).lifetime++;
+                     break;
+                  }
+               }
+            }
+            else{
+               cvRectangle(Mask, cvPoint(posX - MASKSIZE, posY - MASKSIZE), cvPoint(posX + MASKSIZE, posY + MASKSIZE), CV_RGB(255, 0, 255), CV_FILLED, 8);
+               ROI tmp;
+               tmp.id = ROI_num++;
+               ROI_num %= 100;
+               tmp.leftTop_x = posX - MASKSIZE;
+               tmp.leftTop_y = posY - MASKSIZE;
+               tmp.rightBot_x = posX + MASKSIZE;
+               tmp.rightBot_y = posY + MASKSIZE;
+               tmp.past = cvPoint(posX, posY);
+               tmp.flag = 0;
+               tmp.lifetime = 10;
+               ROIs.push_back(tmp);
+            }
+            //}
+         //}
+         contours = contours->h_next;
+      }
+      cvShowImage("Scaled Video", scaled);
+      //cvShowImage("Original Video", frame);
+      //cvShowImage("Mask Video", Mask);
+      //cvShowImage("Test Video",test);
+      if (cvWaitKey(10) == 'p')
+         break;
+   }
+   cvReleaseCapture(&capture); //메모리해제
+   cvReleaseImage(&frame);
+   cvReleaseImage(&diffImage);
+   cvDestroyAllWindows();
+}
